@@ -1,0 +1,1566 @@
+# ARCHON 2.0 - AI CODE ORCHESTRATOR
+## Technical Specification & Implementation Guide
+
+---
+
+## I. PROJECT GOAL
+
+Build **Archon 2.0** - an autonomous system that:
+
+1. Reads structured `deployment_plan.json` (user-created)
+2. Uses **GPT-4o** (architect) to generate step-by-step instructions per module
+3. Uses **Claude Sonnet 4.5** (builder) to generate code
+4. Validates code (syntax, imports, dependencies)
+5. Integrates modules (fixes imports, proper structure)
+6. Deploys automatically (creates venv, installs deps, runs tests)
+7. Outputs: **fully working, modular projects**
+
+### Use Case:
+```
+Input:  deployment_plan.json (describes SaaS app: auth + payments + frontend)
+Output: Working project, dependencies installed, ready to run
+```
+
+### Key Feature:
+**Modular design** - backend/frontend/auth as reusable building blocks that can be:
+- Generated separately
+- Combined together
+- Swapped out (different frontend, same backend)
+
+---
+
+## II. ARCHITECTURE
+
+### Directory Structure:
+```
+Archon2/
+├── core/
+│   ├── orchestrator.py          # Main brain
+│   ├── plan_parser.py           # Reads deployment_plan.json
+│   ├── architect.py             # GPT-4o instruction generator
+│   ├── builder.py               # Claude code generator
+│   ├── validator.py             # Syntax + import checker
+│   ├── integrator.py            # Module linker (fixes imports)
+│   ├── deployer.py              # Venv + pip install + tests
+│   └── state.py                 # State management
+├── templates/
+│   ├── deployment_plan.schema.json
+│   └── modules/                 # Reusable module templates
+│       ├── backend_fastapi/
+│       ├── frontend_react/
+│       └── auth_jwt/
+├── api/
+│   └── main.py                  # FastAPI REST interface
+├── cli/
+│   └── main.py                  # Command-line interface
+├── projects/                    # Generated projects
+├── .env                         # API keys
+└── requirements.txt
+```
+
+---
+
+## III. DEPLOYMENT PLAN FORMAT
+
+### Schema: `deployment_plan.schema.json`
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["project_name", "version", "modules"],
+  "properties": {
+    "project_name": {"type": "string"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "description": {"type": "string"},
+    "tech_stack": {
+      "type": "object",
+      "properties": {
+        "backend": {"type": "string"},
+        "frontend": {"type": "string"},
+        "database": {"type": "string"},
+        "auth": {"type": "string"}
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type", "description", "dependencies", "files"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "type": {"type": "string", "enum": ["backend", "frontend", "shared", "config"]},
+          "description": {"type": "string"},
+          "dependencies": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "type"],
+              "properties": {
+                "path": {"type": "string"},
+                "type": {"type": "string"},
+                "description": {"type": "string"}
+              }
+            }
+          },
+          "integration": {
+            "type": "object",
+            "properties": {
+              "imports_from": {"type": "array", "items": {"type": "string"}},
+              "exports": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "syntax": {"type": "boolean"},
+              "imports": {"type": "array", "items": {"type": "string"}},
+              "tests": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "venv": {"type": "boolean"},
+        "requirements": {"type": "string"},
+        "run_command": {"type": "string"},
+        "tests": {"type": "string"}
+      }
+    }
+  }
+}
+```
+
+### Example: `blog_api_plan.json`
+```json
+{
+  "project_name": "blog_api",
+  "version": "1.0.0",
+  "description": "FastAPI blog with JWT auth and SQLite",
+  "tech_stack": {
+    "backend": "fastapi",
+    "database": "sqlite",
+    "auth": "jwt"
+  },
+  "modules": [
+    {
+      "id": "mod_database",
+      "name": "database",
+      "type": "backend",
+      "description": "SQLite database with User and Post models using SQLAlchemy",
+      "dependencies": [],
+      "files": [
+        {"path": "database/models.py", "type": "sqlalchemy_models"},
+        {"path": "database/db.py", "type": "database_connection"}
+      ],
+      "validation": {
+        "syntax": true,
+        "imports": ["sqlalchemy"],
+        "tests": ["test_db_connection"]
+      }
+    },
+    {
+      "id": "mod_auth",
+      "name": "auth",
+      "type": "backend",
+      "description": "JWT authentication with /login and /signup endpoints",
+      "dependencies": ["mod_database"],
+      "files": [
+        {"path": "auth/routes.py", "type": "fastapi_router"},
+        {"path": "auth/jwt.py", "type": "jwt_handler"},
+        {"path": "auth/models.py", "type": "pydantic_models"}
+      ],
+      "integration": {
+        "imports_from": ["database.models", "database.db"],
+        "exports": ["auth.routes.router"]
+      },
+      "validation": {
+        "syntax": true,
+        "imports": ["fastapi", "python-jose", "passlib"],
+        "tests": ["test_login", "test_signup"]
+      }
+    },
+    {
+      "id": "mod_backend",
+      "name": "backend",
+      "type": "backend",
+      "description": "Main FastAPI app with all routers integrated",
+      "dependencies": ["mod_auth"],
+      "files": [
+        {"path": "main.py", "type": "fastapi_app"}
+      ],
+      "integration": {
+        "imports_from": ["auth.routes", "database.db"]
+      },
+      "validation": {
+        "syntax": true,
+        "imports": ["fastapi", "uvicorn"],
+        "tests": ["test_app_startup"]
+      }
+    }
+  ],
+  "deployment": {
+    "venv": true,
+    "requirements": "auto-generate",
+    "run_command": "uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+    "tests": "pytest tests/ -v"
+  }
+}
+```
+
+---
+
+## IV. EXECUTION FLOW
+```
+1. User creates deployment_plan.json
+   ↓
+2. orchestrator.build_project(plan_path)
+   ↓
+3. plan_parser: load + validate + sort by dependencies
+   ↓
+4. FOR EACH module (in dependency order):
+   ├─ architect (GPT-4o): generate detailed instructions
+   ├─ builder (Claude): generate code
+   ├─ validator: check syntax + imports
+   ├─ IF errors → retry with fixes (max 2 attempts)
+   └─ Save files
+   ↓
+5. integrator: fix imports between modules
+   ↓
+6. deployer: create venv → install deps → run tests
+   ↓
+7. Return: Working project + build report
+```
+
+---
+
+## V. CORE MODULES
+
+### 1. `core/orchestrator.py`
+
+**Main coordination logic**
+```python
+def build_project(plan_path: str) -> dict:
+    """
+    Orchestrates entire build process.
+    
+    Returns build report:
+    {
+        "status": "success" | "failed",
+        "modules_built": 3,
+        "files_created": 8,
+        "errors": [...],
+        "project_path": "projects/blog_api"
+    }
+    """
+    # 1. Parse plan
+    # 2. Sort modules by dependencies
+    # 3. Build each module (architect → builder → validator)
+    # 4. Integrate modules
+    # 5. Deploy (venv + deps)
+    # 6. Return report
+```
+
+---
+
+### 2. `core/plan_parser.py`
+
+**Load and validate deployment plan**
+```python
+def load_plan(path: str) -> dict:
+    """Load deployment_plan.json and validate against schema"""
+
+def validate_dependencies(modules: list) -> bool:
+    """Check: no circular deps, all dependencies exist"""
+
+def sort_by_dependencies(modules: list) -> list:
+    """Topological sort - modules with no deps come first"""
+```
+
+---
+
+### 3. `core/architect.py`
+
+**GPT-4o generates instructions for Claude**
+```python
+def generate_instructions(
+    module: dict,
+    plan: dict,
+    completed_modules: list
+) -> str:
+    """
+    Call GPT-4o API to generate detailed instructions for Claude.
+    
+    Prompt structure:
+    - Module description
+    - Files to create
+    - Dependencies (what was already built)
+    - Integration requirements (imports, exports)
+    - Tech stack constraints
+    
+    Returns: Detailed instruction string
+    """
+```
+
+**GPT-4o Prompt Template:**
+```
+You are generating detailed instructions for Claude to write code.
+
+Module: {module['name']}
+Description: {module['description']}
+
+Files to create:
+{for each file in module['files']}
+- {file['path']}: {file['description']}
+
+Dependencies (already built):
+{for each dep in completed_modules}
+- {dep['name']}: available to import from
+
+Integration:
+- Must import from: {module['integration']['imports_from']}
+- Must export: {module['integration']['exports']}
+
+Tech stack: {plan['tech_stack']}
+
+Required imports: {module['validation']['imports']}
+
+Generate instructions for Claude to:
+1. Create each file with proper structure
+2. Use correct imports from dependency modules
+3. Implement all required functionality
+4. Follow best practices for {tech_stack}
+
+Be specific about import paths and module structure.
+```
+
+---
+
+### 4. `core/builder.py`
+
+**Claude generates actual code**
+```python
+def generate_module_code(
+    project: str,
+    module: dict,
+    instructions: str,
+    plan: dict,
+    completed_modules: list
+) -> dict:
+    """
+    Call Claude Sonnet 4.5 API with instructions.
+    
+    Returns:
+    {
+        "files": {
+            "filename.py": "code content",
+            ...
+        },
+        "status": "success" | "error",
+        "error": "error message if any"
+    }
+    """
+```
+
+**Claude Prompt:**
+```
+{instructions from GPT-4o}
+
+Generate code for all files listed above.
+
+Return ONLY valid JSON mapping filenames to code:
+{
+  "database/models.py": "from sqlalchemy import ...",
+  "database/db.py": "import sqlite3..."
+}
+
+CRITICAL:
+- Use proper import paths (e.g., from database.models import User)
+- Implement all required functionality
+- Follow Python best practices
+- No explanations, only JSON
+```
+
+**JSON Extraction:**
+```python
+def extract_json_from_text(text: str) -> str:
+    """Extract JSON from markdown code blocks or plain text"""
+    # Check for ```json...``` blocks
+    # Check for ```...``` blocks starting with {
+    # Check for raw {...} in text
+    # Return cleaned JSON string
+```
+
+---
+
+### 5. `core/validator.py`
+
+**Validate generated code**
+```python
+def validate_syntax(code: str) -> tuple[bool, str]:
+    """
+    Use Python AST to parse code.
+    Returns: (is_valid, error_message)
+    """
+    try:
+        ast.parse(code)
+        return (True, "")
+    except SyntaxError as e:
+        return (False, f"Syntax error at line {e.lineno}: {e.msg}")
+
+def validate_imports(code: str, available_modules: list) -> tuple[bool, list]:
+    """
+    Parse import statements, check if they're valid.
+    Returns: (is_valid, [missing_imports])
+    """
+    # Parse AST for Import and ImportFrom nodes
+    # Check if imports are:
+    #   - Standard library
+    #   - Listed in requirements
+    #   - From completed modules
+
+def validate_module(
+    module_files: dict,
+    module_spec: dict,
+    completed_modules: list
+) -> dict:
+    """
+    Validate entire module.
+    
+    Returns:
+    {
+        "valid": bool,
+        "errors": [
+            {"file": "x.py", "error": "...", "line": 10}
+        ],
+        "warnings": [...]
+    }
+    """
+```
+
+---
+
+### 6. `core/integrator.py`
+
+**Fix imports and integrate modules**
+```python
+def fix_imports(project_path: str, modules: list) -> dict:
+    """
+    Scan all .py files, fix import statements.
+    
+    Transforms:
+        from db import init_db
+        → from database.db import init_db
+        
+        from models import User
+        → from database.models import User
+    
+    Returns:
+    {
+        "files_modified": [list of paths],
+        "imports_fixed": count
+    }
+    """
+
+def create_init_files(project_path: str, modules: list):
+    """
+    Create __init__.py in each module folder.
+    Enables proper Python package imports.
+    """
+```
+
+---
+
+### 7. `core/deployer.py`
+
+**Deploy: venv, dependencies, tests**
+```python
+def create_venv(project_path: str) -> bool:
+    """
+    Create Python virtual environment.
+    
+    Command: python3 -m venv venv
+    """
+
+def generate_requirements(modules: list) -> str:
+    """
+    Extract all imports from module validation specs.
+    Generate requirements.txt content.
+    """
+
+def install_dependencies(project_path: str) -> dict:
+    """
+    Install dependencies in venv.
+    
+    Command: venv/bin/pip install -r requirements.txt
+    
+    Returns:
+    {
+        "success": bool,
+        "output": str,
+        "packages_installed": int
+    }
+    """
+
+def run_tests(project_path: str, test_command: str) -> dict:
+    """
+    Run tests in venv.
+    
+    Command: venv/bin/pytest tests/ -v
+    
+    Returns:
+    {
+        "success": bool,
+        "output": str,
+        "tests_passed": int,
+        "tests_failed": int
+    }
+    """
+```
+
+---
+
+### 8. `core/state.py`
+
+**State management and logging**
+```python
+def save_state(stage: str, data: dict, project: str):
+    """
+    Save state snapshot to:
+    projects/{project}/state/{stage}_{timestamp}.json
+    """
+
+def load_state(project: str, stage: str) -> dict:
+    """Load most recent state for given stage"""
+
+def rollback_state(project: str, stage: str):
+    """Restore previous state"""
+```
+
+---
+
+## VI. IMPLEMENTATION PHASES
+
+### PHASE 1: Parser & Orchestrator (Day 1)
+
+**Tasks:**
+1. Create `deployment_plan.schema.json`
+2. Implement `plan_parser.py` (load, validate, sort)
+3. Implement `orchestrator.py` skeleton (main loop)
+
+**Test:** Load plan → validate → print execution order
+
+**Deliverable:** Parser reads plan, outputs sorted module list
+
+---
+
+### PHASE 2: Architect & Builder (Day 2)
+
+**Tasks:**
+1. Implement `architect.py` (GPT-4o instruction generation)
+2. Implement `builder.py` (Claude code generation)
+3. Integrate with orchestrator
+
+**Test:** Generate instructions → generate code → verify JSON output
+
+**Deliverable:** GPT→Claude pipeline working per module
+
+---
+
+### PHASE 3: Validation (Day 3)
+
+**Tasks:**
+1. Implement `validator.py` (syntax, imports)
+2. Add validation loop to orchestrator
+3. Add retry-with-fixes logic
+
+**Test:** Generate broken code → validator catches → fixes → validates
+
+**Deliverable:** Validation + auto-fix working
+
+---
+
+### PHASE 4: Integration & Deployment (Day 4)
+
+**Tasks:**
+1. Implement `integrator.py` (fix imports, __init__ files)
+2. Implement `deployer.py` (venv, pip, tests)
+3. Complete orchestrator end-to-end
+
+**Test:** Build 3-module project → integrator fixes imports → deployer creates venv → project runs
+
+**Deliverable:** End-to-end working system
+
+---
+
+### PHASE 5: API & CLI (Day 5)
+
+**Tasks:**
+1. Implement `api/main.py` (FastAPI REST interface)
+2. Implement `cli/main.py` (command-line tool)
+3. Create example templates
+
+**Test:** CLI builds project → API accepts plan → returns working code
+
+**Deliverable:** Complete Archon 2.0 MVP
+
+---
+
+## VII. ENVIRONMENT
+
+### `.env` file:
+```ini
+# GPT-4o (architect)
+OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-4o
+
+# Claude Sonnet 4.5 (builder)
+ANTHROPIC_API_KEY=sk-ant-api03-...
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+ANTHROPIC_VERSION=2023-06-01
+```
+
+### `requirements.txt`:
+```
+fastapi==0.120.1
+uvicorn==0.38.0
+pydantic==2.12.3
+requests==2.32.5
+python-dotenv==1.2.1
+jsonschema==4.23.0
+```
+
+---
+
+## VIII. SUCCESS CRITERIA
+
+**MVP Must Have:**
+- ✅ Read & validate deployment_plan.json
+- ✅ Sort modules by dependencies (topological)
+- ✅ Generate code per module (GPT-4o + Claude)
+- ✅ Validate syntax & imports
+- ✅ Fix imports between modules
+- ✅ Create venv + install dependencies
+- ✅ Output: working project that runs
+
+**Nice to Have:**
+- Auto-fix validation errors (retry loop)
+- Run tests automatically
+- Progress logs / streaming
+- Module templates library
+
+---
+
+## IX. EXAMPLE OUTPUT
+
+### Input: `blog_api_plan.json`
+
+### Output:
+```
+projects/blog_api/
+├── venv/                      # Virtual environment
+├── database/
+│   ├── __init__.py
+│   ├── models.py              # User, Post SQLAlchemy models
+│   └── db.py                  # Database connection
+├── auth/
+│   ├── __init__.py
+│   ├── routes.py              # /login, /signup endpoints
+│   ├── jwt.py                 # JWT token handler
+│   └── models.py              # Pydantic request models
+├── main.py                    # FastAPI app
+├── requirements.txt           # Auto-generated
+└── tests/
+    ├── test_auth.py
+    └── test_database.py
+
+Build Report:
+✅ 3 modules generated
+✅ 8 files created
+✅ All imports validated and fixed
+✅ Virtual environment created
+✅ 12 dependencies installed
+✅ 6/6 tests passed
+
+Run: cd projects/blog_api && source venv/bin/activate && python main.py
+```
+
+---
+
+## X. TECHNICAL CONSTRAINTS
+
+**Language:** Python 3.11+
+**OS:** Linux (Mint/Ubuntu)
+**APIs:** OpenAI GPT-4o, Anthropic Claude Sonnet 4.5
+**Models:** Must use GPT-4o for architect, Claude for builder
+**Output:** Backend-focused (FastAPI), frontend optional future feature
+
+---
+
+## XI. START IMPLEMENTATION
+
+**Step 1:** Create directory structure
+**Step 2:** Implement Phase 1 (parser + orchestrator skeleton)
+**Step 3:** Test with example deployment_plan.json
+**Step 4:** Iterate through phases 2-5
+
+**Target:** 5 days to working MVP
+
+//file: archon1_backup_20251028_172047.txt
+
+
+
+Let's start with Phase 1.
+
+
+
+
+
+
+
+
+
+
+================================================================================
+ARCHON 1.0 - CODE BACKUP FOR REFERENCE
+Generated: 2025-10-28 17:53:20
+================================================================================
+
+################################################################################
+# FILE: core/state.py
+################################################################################
+import json, os, shutil
+from datetime import datetime
+
+def _path(project, stage):
+    return f"projects/{project}/state/{stage}.json"
+
+def save_state(stage, data, project):
+    os.makedirs(f"projects/{project}/state", exist_ok=True)
+    with open(_path(project, stage), "w") as f:
+        json.dump({"timestamp": datetime.now().isoformat(), "data": data}, f, indent=2)
+
+def load_state(project, stage):
+    with open(_path(project, stage)) as f:
+        return json.load(f)
+
+def resume_state(project, from_stage):
+    data = load_state(project, from_stage)
+    return {"status": "resumed", "from": from_stage, "data": data}
+
+def rollback_state(project, to_stage):
+    data = load_state(project, to_stage)
+    save_state("rollback", data, project)
+    return {"status": "rolled_back", "to": to_stage}
+
+def clone_project(project):
+    src = f"projects/{project}"
+    dest = f"projects/{project}_clone"
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+    return {"status": "cloned", "clone_path": dest}
+
+################################################################################
+# FILE: core/folder_worker.py
+################################################################################
+import os, json, re, requests
+from core.state import save_state, load_state
+from dotenv import load_dotenv
+load_dotenv()
+
+def extract_json_from_text(text: str):
+    """Extract JSON from text that may contain markdown code blocks."""
+    match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        potential_json = match.group(1).strip()
+        if potential_json.startswith('{'):
+            return potential_json
+    match = re.search(r'(\{.*\})', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+def generate_code_for_folder(project: str, folder_path: str, description: str, blueprint: dict = None, completed_modules: list = None):
+    """
+    Generate code for a specific folder with full context awareness.
+    
+    Args:
+        project: Project name
+        folder_path: Path like 'backend/api' or 'frontend/src'
+        description: What this module should do
+        blueprint: Full blueprint dict from GPT-5 (provides context of other modules)
+        completed_modules: List of already generated modules with their outputs
+    """
+    base = f"projects/{project}/output/{folder_path}"
+    os.makedirs(base, exist_ok=True)
+
+    # Build context-aware prompt
+    context_info = ""
+    
+    if blueprint:
+        context_info += f"\n\nFULL PROJECT BLUEPRINT:\n{json.dumps(blueprint, indent=2)}"
+    
+    if completed_modules:
+        context_info += f"\n\nALREADY GENERATED MODULES:\n"
+        for mod in completed_modules:
+            context_info += f"- {mod['folder']}: {', '.join(mod.get('created', []))}\n"
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": os.getenv("CLOUD_API_KEY"),
+        "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+        "content-type": "application/json",
+    }
+
+    prompt = f"""You are a code generator for the folder '{folder_path}' in project '{project}'.
+
+TASK: {description}
+{context_info}
+
+Generate ONLY the code files needed for THIS folder ('{folder_path}').
+Return valid JSON mapping filenames to their complete code content.
+
+CRITICAL RULES:
+1. Return ONLY JSON, no explanations
+2. Use relative imports when referencing other modules from the blueprint
+3. File paths should be relative to '{folder_path}' (just filename, no subdirectories)
+4. Each file must have complete, working code
+5. If this module depends on others, import them correctly
+
+JSON FORMAT:
+{{
+  "main.py": "from fastapi import FastAPI\\napp = FastAPI()\\n...",
+  "routes.py": "from fastapi import APIRouter\\nrouter = APIRouter()\\n...",
+  "models.py": "from pydantic import BaseModel\\n..."
+}}
+
+Return ONLY the JSON object.
+"""
+
+    payload = {
+        "model": os.getenv("CLOUD_MODEL", "claude-sonnet-4-5-20250929"),
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": prompt}]}
+        ],
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=180)
+        resp.raise_for_status()
+        raw = resp.json()
+        
+        text = ""
+        if isinstance(raw.get("content"), list):
+            for part in raw["content"]:
+                if part.get("type") == "text":
+                    text += part.get("text", "")
+
+        clean = extract_json_from_text(text)
+        files = json.loads(clean)
+        
+        if not isinstance(files, dict):
+            raise ValueError(f"Expected dict, got {type(files)}")
+            
+    except requests.exceptions.Timeout:
+        files = {"error": "Claude timeout after 180s"}
+    except json.JSONDecodeError as e:
+        files = {"error": f"JSON parse failed: {e}", "raw_response": text[:500]}
+    except Exception as e:
+        files = {"error": str(e)}
+
+    # Write files to disk
+    created_files = []
+    for filename, content in files.items():
+        if filename == "error":
+            continue
+        path = os.path.join(base, filename)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(str(content))
+        created_files.append(path)
+
+    report = {
+        "folder": folder_path,
+        "created": created_files,
+        "files": files if "error" not in files else {"error": files["error"]}
+    }
+    save_state(f"worker_{folder_path.replace('/', '_')}", report, project)
+    return report
+
+################################################################################
+# FILE: core/blueprint_builder.py
+################################################################################
+import os, json, re, requests
+from dotenv import load_dotenv
+from core.state import save_state
+load_dotenv()
+
+def extract_json_from_text(text: str):
+    """Extract JSON from text that may contain markdown code blocks or explanations."""
+    # Try to find JSON in markdown code block
+    match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Try to find JSON in generic code block
+    match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        potential_json = match.group(1).strip()
+        if potential_json.startswith('{') or potential_json.startswith('['):
+            return potential_json
+    
+    # Try to find raw JSON (starts with { or [)
+    match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Last resort: return as-is and let json.loads fail with clear error
+    return text.strip()
+
+def generate_blueprint(project: str, description: str):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    prompt = f"""
+Decompose the following software concept into distinct modules with clear sub-tasks:
+'{description}'.
+
+Return ONLY valid JSON (no explanations, no markdown) in this exact format:
+{{
+  "backend": "FastAPI with endpoints /auth, /reels, /payments",
+  "frontend": "React + Tailwind login + dashboard",
+  "database": "SQLite or Postgres setup",
+  "auth": "JWT token login and signup"
+}}
+
+CRITICAL: Return ONLY the JSON object, nothing else.
+"""
+
+    payload = {
+        "model": os.getenv("OPENAI_MODEL", "gpt-4o"),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # Handle different response formats
+        if "choices" in data:
+            blueprint_raw = data["choices"][0]["message"]["content"]
+        elif "output" in data:
+            blueprint_raw = data["output"]["content"][0]["text"]
+        else:
+            raise ValueError(f"Unexpected GPT response format: {data}")
+        
+        # Extract JSON from potentially wrapped text
+        json_str = extract_json_from_text(blueprint_raw)
+        blueprint = json.loads(json_str)
+        
+        # Validate it's a dict
+        if not isinstance(blueprint, dict):
+            raise ValueError(f"Blueprint must be a dict, got {type(blueprint)}")
+        
+        save_state("blueprint", blueprint, project)
+        return blueprint
+        
+    except requests.exceptions.Timeout:
+        raise Exception(f"GPT-5 timeout after 90s. Try shorter description or split into modules.")
+    except json.JSONDecodeError as e:
+        raise Exception(f"Failed to parse GPT-5 response as JSON: {e}\nRaw response: {blueprint_raw[:500]}")
+    except Exception as e:
+        raise Exception(f"Blueprint generation failed: {e}")
+
+################################################################################
+# FILE: core/structure.py
+################################################################################
+import os, json
+from core.state import save_state
+
+def create_structure(project: str, layout: dict):
+    """
+    layout: dict typu
+    {
+      "backend": {
+         "api": ["main.py", "routes.py"],
+         "models": ["user.py"]
+      },
+      "frontend": {
+         "src": ["index.html", "app.js"]
+      },
+      "shared": ["README.md"]
+    }
+    """
+    base_dir = f"projects/{project}/output"
+    created = []
+
+    def make_dir(path):
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+
+    for folder, content in layout.items():
+        folder_path = os.path.join(base_dir, folder)
+        make_dir(folder_path)
+
+        if isinstance(content, dict):
+            for subfolder, files in content.items():
+                sub_path = os.path.join(folder_path, subfolder)
+                make_dir(sub_path)
+                for f in files:
+                    full_path = os.path.join(sub_path, f)
+                    open(full_path, "w").close()
+                    created.append(full_path)
+        elif isinstance(content, list):
+            for f in content:
+                full_path = os.path.join(folder_path, f)
+                open(full_path, "w").close()
+                created.append(full_path)
+        else:
+            full_path = os.path.join(base_dir, folder)
+            open(full_path, "w").close()
+            created.append(full_path)
+
+    save_state("stage_structure", {"created": created}, project)
+    return {"created": created}
+
+################################################################################
+# FILE: core/plan_generator.py
+################################################################################
+import os, json, re, requests
+from dotenv import load_dotenv
+from core.state import save_state
+
+load_dotenv()
+
+def extract_json_from_text(text: str):
+    """Extract JSON from markdown or plain text."""
+    match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        potential = match.group(1).strip()
+        if potential.startswith('{'):
+            return potential
+    match = re.search(r'(\{.*\})', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+def generate_deployment_plan(project: str, description: str):
+    """
+    Generate deployment plan with modules + dependencies.
+    
+    Returns:
+    {
+      "project": "name",
+      "modules": [
+        {
+          "id": "step_1_database",
+          "name": "database",
+          "description": "SQLite setup with users table",
+          "dependencies": [],
+          "outputs": ["models/user.py", "db.py"]
+        },
+        {
+          "id": "step_2_auth",
+          "name": "auth",
+          "description": "JWT authentication",
+          "dependencies": ["step_1_database"],
+          "outputs": ["auth/routes.py", "auth/jwt.py"]
+        }
+      ]
+    }
+    """
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    
+    prompt = f"""Create a deployment plan for: "{description}"
+
+Break this into logical modules with clear dependencies.
+
+Return ONLY valid JSON in this EXACT format:
+{{
+  "project": "{project}",
+  "modules": [
+    {{
+      "id": "step_1_database",
+      "name": "database",
+      "description": "SQLite database with users and posts tables",
+      "dependencies": [],
+      "outputs": ["models/user.py", "models/post.py", "db.py"]
+    }},
+    {{
+      "id": "step_2_auth",
+      "name": "auth",
+      "description": "JWT authentication with /login and /signup endpoints",
+      "dependencies": ["step_1_database"],
+      "outputs": ["auth/routes.py", "auth/jwt.py", "auth/models.py"]
+    }},
+    {{
+      "id": "step_3_backend",
+      "name": "backend",
+      "description": "FastAPI main app with endpoints",
+      "dependencies": ["step_2_auth"],
+      "outputs": ["main.py", "routes.py"]
+    }}
+  ]
+}}
+
+RULES:
+1. Start with foundational modules (database, models) that have NO dependencies
+2. Each module lists OTHER modules it depends on (by their id)
+3. Later modules can depend on earlier ones
+4. outputs = list of files that will be created in this module
+5. Return ONLY JSON, no explanations
+
+CRITICAL: Return ONLY the JSON object."""
+
+    payload = {
+        "model": os.getenv("OPENAI_MODEL", "gpt-4o"),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if "choices" in data:
+            raw = data["choices"][0]["message"]["content"]
+        else:
+            raise ValueError(f"Unexpected response: {data}")
+        
+        json_str = extract_json_from_text(raw)
+        plan = json.loads(json_str)
+        
+        # Validate structure
+        if "modules" not in plan:
+            raise ValueError("Plan missing 'modules' key")
+        
+        # Save plan
+        save_state("deployment_plan", plan, project)
+        return plan
+        
+    except requests.exceptions.Timeout:
+        raise Exception("GPT-4o timeout generating plan")
+    except json.JSONDecodeError as e:
+        raise Exception(f"Failed to parse plan JSON: {e}")
+    except Exception as e:
+        raise Exception(f"Plan generation failed: {e}")
+
+################################################################################
+# FILE: core/plan_executor.py
+################################################################################
+import os, json
+from core.state import save_state, load_state
+from core.folder_worker import generate_code_for_folder
+from core.structure import create_structure
+
+def validate_dependencies(modules: list):
+    """Ensure all dependencies exist and no circular deps."""
+    module_ids = {m["id"] for m in modules}
+    
+    for module in modules:
+        for dep in module.get("dependencies", []):
+            if dep not in module_ids:
+                raise ValueError(f"Module {module['id']} depends on unknown module: {dep}")
+    
+    return True
+
+def sort_modules_by_dependencies(modules: list):
+    """Topological sort: modules with no deps first, then their dependents."""
+    sorted_modules = []
+    processed = set()
+    
+    # Keep trying until all modules are processed
+    while len(sorted_modules) < len(modules):
+        made_progress = False
+        
+        for module in modules:
+            if module["id"] in processed:
+                continue
+            
+            # Check if all dependencies are processed
+            deps = module.get("dependencies", [])
+            if all(dep in processed for dep in deps):
+                sorted_modules.append(module)
+                processed.add(module["id"])
+                made_progress = True
+        
+        if not made_progress:
+            raise ValueError("Circular dependency detected in plan")
+    
+    return sorted_modules
+
+def execute_deployment_plan(project: str):
+    """
+    Execute deployment plan step by step with context.
+    
+    1. Load plan from state
+    2. Sort modules by dependencies
+    3. Execute each module in order
+    4. Pass accumulated context to each step
+    5. Validate after each step
+    """
+    base_dir = f"projects/{project}"
+    
+    # Load plan
+    try:
+        plan_state = load_state(project, "deployment_plan")
+        plan = plan_state["data"]
+    except Exception as e:
+        raise Exception(f"Failed to load deployment plan: {e}")
+    
+    modules = plan.get("modules", [])
+    if not modules:
+        raise ValueError("Plan has no modules")
+    
+    # Validate dependencies
+    validate_dependencies(modules)
+    
+    # Sort by dependencies
+    sorted_modules = sort_modules_by_dependencies(modules)
+    
+    print(f"[PLAN EXECUTOR] Executing {len(sorted_modules)} modules in order:")
+    for i, mod in enumerate(sorted_modules, 1):
+        deps = mod.get("dependencies", [])
+        dep_str = f" (depends on: {', '.join(deps)})" if deps else " (no dependencies)"
+        print(f"  {i}. {mod['name']}{dep_str}")
+    
+    # Create folder structure
+    layout = {mod["name"]: [] for mod in sorted_modules}
+    create_structure(project, layout)
+    
+    # Execute modules in order with context
+    results = []
+    completed_modules = []
+    
+    for idx, module in enumerate(sorted_modules, 1):
+        module_id = module["id"]
+        module_name = module["name"]
+        module_desc = module["description"]
+        
+        print(f"\n[PLAN EXECUTOR] → [{idx}/{len(sorted_modules)}] Executing: {module_name}")
+        print(f"[PLAN EXECUTOR]   Description: {module_desc}")
+        
+        # Build context from dependencies
+        dependency_context = []
+        for dep_id in module.get("dependencies", []):
+            # Find completed module with this id
+            for completed in completed_modules:
+                if completed.get("module_id") == dep_id:
+                    dependency_context.append(completed)
+                    break
+        
+        # Generate code with full context
+        result = generate_code_for_folder(
+            project=project,
+            folder_path=module_name,
+            description=module_desc,
+            blueprint=plan,  # Full plan as context
+            completed_modules=dependency_context  # Only direct dependencies
+        )
+        
+        # Add module_id to result for dependency tracking
+        result["module_id"] = module_id
+        result["module_name"] = module_name
+        
+        results.append(result)
+        completed_modules.append(result)
+        
+        # Check for errors
+        if "error" in result.get("files", {}):
+            print(f"[PLAN EXECUTOR] ⚠ Warning: {module_name} generated with errors: {result['files']['error']}")
+        else:
+            file_count = len(result.get("created", []))
+            print(f"[PLAN EXECUTOR] ✓ {module_name} complete: {file_count} files")
+    
+    # Save execution results
+    execution_report = {
+        "plan": plan,
+        "execution_order": [m["id"] for m in sorted_modules],
+        "results": results,
+        "total_files": sum(len(r.get("created", [])) for r in results)
+    }
+    save_state("plan_execution", execution_report, project)
+    
+    print(f"\n[PLAN EXECUTOR] ✓ Execution complete: {execution_report['total_files']} files generated")
+    
+    return execution_report
+
+################################################################################
+# FILE: core/intelligent_builder.py
+################################################################################
+import os, json, requests
+from dotenv import load_dotenv
+from core.state import save_state
+from core.plan_generator import generate_deployment_plan
+from core.plan_executor import execute_deployment_plan
+
+load_dotenv()
+
+def intelligent_build(project: str, description: str, use_plan: bool = False):
+    """
+    Intelligent build with optional deployment plan.
+    
+    Args:
+        project: Project name
+        description: What to build
+        use_plan: If True, generate deployment plan first, then execute
+    """
+    base_dir = f"projects/{project}"
+    os.makedirs(f"{base_dir}/output", exist_ok=True)
+    os.makedirs(f"{base_dir}/state", exist_ok=True)
+
+    if use_plan:
+        # === NEW: Plan-based build ===
+        print(f"[ARCHON] Stage 1: Generating deployment plan with GPT-4o...")
+        plan = generate_deployment_plan(project, description)
+        print(f"[ARCHON] ✓ Plan created: {len(plan['modules'])} modules")
+        
+        print(f"[ARCHON] Stage 2: Executing deployment plan...")
+        result = execute_deployment_plan(project)
+        
+        manifest = {
+            "project": project,
+            "build_type": "plan_based",
+            "modules": [m["name"] for m in plan["modules"]],
+            "status": "completed",
+            "total_files": result["total_files"]
+        }
+        save_state("manifest", manifest, project)
+        
+        print(f"[ARCHON] ✓ Project complete: {manifest['total_files']} files generated")
+        return manifest
+    
+    else:
+        # === OLD: Blueprint-based build (kept for compatibility) ===
+        from core.blueprint_builder import generate_blueprint
+        from core.structure import create_structure
+        from core.folder_worker import generate_code_for_folder
+        
+        print(f"[ARCHON] Stage 1: Generating blueprint with GPT-4o...")
+        blueprint = generate_blueprint(project, description)
+        save_state("stage_1_blueprint", blueprint, project)
+        print(f"[ARCHON] ✓ Blueprint created: {list(blueprint.keys())}")
+
+        print(f"[ARCHON] Stage 2: Creating folder structure...")
+        layout = {module_name: [] for module_name in blueprint.keys()}
+        create_structure(project, layout)
+        print(f"[ARCHON] ✓ Folders created")
+
+        print(f"[ARCHON] Stage 3: Generating code for each module...")
+        results = []
+        completed_modules = []
+        
+        for idx, (module_name, module_desc) in enumerate(blueprint.items(), 1):
+            print(f"[ARCHON] → [{idx}/{len(blueprint)}] Generating {module_name}...")
+            
+            result = generate_code_for_folder(
+                project=project,
+                folder_path=module_name,
+                description=module_desc,
+                blueprint=blueprint,
+                completed_modules=completed_modules
+            )
+            
+            results.append(result)
+            completed_modules.append(result)
+            
+            if "error" in result.get("files", {}):
+                print(f"[ARCHON] ⚠ Warning: {module_name} generated with errors: {result['files']['error']}")
+            else:
+                print(f"[ARCHON] ✓ {module_name} complete: {len(result.get('created', []))} files")
+
+        save_state("stage_3_generation_results", results, project)
+
+        manifest = {
+            "project": project,
+            "build_type": "blueprint_based",
+            "modules": list(blueprint.keys()),
+            "status": "completed",
+            "total_files": sum(len(r.get("created", [])) for r in results)
+        }
+        save_state("stage_4_manifest", manifest, project)
+        
+        print(f"[ARCHON] ✓ Project complete: {manifest['total_files']} files generated")
+        return manifest
+
+################################################################################
+# FILE: api/main.py
+################################################################################
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from core.pipeline import run_pipeline
+from core.state import save_state
+from core.executor import run_local_validation
+from core.structure import create_structure
+from core.intelligent_builder import intelligent_build
+from core.auto_executor import auto_execute
+
+app = FastAPI(title="Archon Genesis API")
+
+class TaskRequest(BaseModel):
+    project_name: str
+    description: str
+
+class PlanTaskRequest(BaseModel):
+    project_name: str
+    description: str
+    use_plan: bool = True
+
+@app.get("/")
+async def root():
+    return {"status": "Archon API online", "version": "1.0"}
+
+@app.post("/task")
+async def start_task(req: TaskRequest):
+    """Classic pipeline: GPT-4o → Claude → Filesystem"""
+    try:
+        result = run_pipeline(req.project_name, req.description)
+        save_state("final", result, req.project_name)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/intelligent_task")
+async def intelligent_task(req: TaskRequest):
+    """Intelligent orchestrator: GPT-4o blueprint → Claude per module with context"""
+    try:
+        result = intelligent_build(req.project_name, req.description, use_plan=False)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/plan_task")
+async def plan_task(req: PlanTaskRequest):
+    """Plan-based build: GPT-4o deployment plan → Execute with dependencies → Claude generates"""
+    try:
+        result = intelligent_build(req.project_name, req.description, use_plan=req.use_plan)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/structure/{project}")
+async def make_structure(project: str, layout: dict):
+    """Manually create directory tree"""
+    try:
+        result = create_structure(project, layout)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/execute/{project}")
+async def execute_project(project: str):
+    """Run local validation test"""
+    try:
+        result = run_local_validation(project)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auto_execute/{project}")
+async def auto_execute_project(project: str):
+    """Full automatic test with logs and shutdown"""
+    try:
+        result = auto_execute(project)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+################################################################################
+# FILE: requirements.txt
+################################################################################
+fastapi
+uvicorn
+requests
+python-dotenv
+
+################################################################################
+# PROJECT STRUCTURE
+################################################################################
+.
+├── ap
+├── api
+│   └── main.py
+├── core
+│   ├── auto_executor.py
+│   ├── blueprint_builder.py
+│   ├── executor.py
+│   ├── folder_worker.py
+│   ├── intelligent_builder.py
+│   ├── pipeline.py
+│   ├── plan_executor.py
+│   ├── plan_generator.py
+│   ├── state.py
+│   └── structure.py
+├── EOF
+├── except
+├── Manual
+│   ├── ARCHON GENESIS — SYSTEM SUMMARY (v1.0 – STABLE)
+│   ├── manual workflow Archona (v1.0)
+│   ├── README_API.md
+│   ├── README_DEV.md
+│   └── README.md
+├── overview.txt
+├── project_code_only.tar.gz
+├── projects
+│   ├── _inputs
+│   │   ├── DEPLOYMENT_PLAN
+│   │   └── PROJECT_SPECIFICATION
+│   ├── local_agent
+│   │   ├── output
+│   │   └── state
+│   ├── local-agent (v0.1 unfinished)
+│   │   ├── output
+│   │   └── state
+│   ├── local-agent-v2
+│   │   └── output
+│   ├── test_api
+│   │   ├── logs
+│   │   ├── output
+│   │   └── state
+│   ├── test_gpt4o
+│   │   ├── output
+│   │   └── state
+│   ├── test_gpt5_fix
+│   │   ├── output
+│   │   └── state
+│   ├── test_plan_v1
+│   │   ├── output
+│   │   └── state
+│   ├── test_simple
+│   │   ├── output
+│   │   └── state
+│   └── vrillsy
+│       ├── output
+│       └── state
+├── requirements.txt
+└── return
+
+33 directories, 25 files
+
+================================================================================
+END OF BACKUP
+================================================================================
