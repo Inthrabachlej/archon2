@@ -1,6 +1,6 @@
-# ARCHON 2.0 - AI Code Orchestrator
+# ARCHON 2.0
 
-**Autonomous system that generates complete, working software projects from deployment plans.**
+AI-assisted software generation system for turning structured prompts into project files, modules, and implementation plans.
 
 ---
 
